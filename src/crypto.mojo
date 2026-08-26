@@ -1,6 +1,7 @@
 """AES, ChaCha20, and SHA-2 kernels exposed through a small C ABI."""
 
 from std.builtin.globals import global_constant
+from std.collections import Array
 from std.sys.info import simd_width_of
 from std.sys.intrinsics import llvm_intrinsic
 
@@ -133,7 +134,7 @@ def xor_bytes[
 
 @always_inline
 def aes_sbox(index: UInt8) -> UInt8:
-    comptime table: InlineArray[UInt8, 256] = [
+    comptime table: Array[UInt8, 256] = [
         0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5,
         0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76,
         0xca, 0x82, 0xc9, 0x7d, 0xfa, 0x59, 0x47, 0xf0,
@@ -173,7 +174,7 @@ def aes_sbox(index: UInt8) -> UInt8:
 
 @always_inline
 def aes_inv_sbox(index: UInt8) -> UInt8:
-    comptime table: InlineArray[UInt8, 256] = [
+    comptime table: Array[UInt8, 256] = [
         0x52, 0x09, 0x6a, 0xd5, 0x30, 0x36, 0xa5, 0x38,
         0xbf, 0x40, 0xa3, 0x9e, 0x81, 0xf3, 0xd7, 0xfb,
         0x7c, 0xe3, 0x39, 0x82, 0x9b, 0x2f, 0xff, 0x87,
@@ -240,7 +241,7 @@ def aes_expand_key[key_origin: MutOrigin, expanded_origin: MutOrigin](
         expanded[i] = key[i]
     var generated = key_length
     var rcon = UInt8(1)
-    var temp = InlineArray[UInt8, 4](fill=0)
+    var temp = Array[UInt8, 4](fill=0)
     while generated < total:
         for j in range(4):
             temp[j] = expanded[generated - 4 + j]
@@ -365,7 +366,7 @@ def aes_encrypt_block[
     destination_offset: Int,
     expanded: UnsafePointer[UInt8, expanded_origin],
 ):
-    var state = InlineArray[UInt8, 16](fill=0)
+    var state = Array[UInt8, 16](fill=0)
     var state_ptr = UnsafePointer(to=state[0])
     for i in range(16):
         state[i] = source[source_offset + i]
@@ -396,7 +397,7 @@ def aes_decrypt_block[
     destination_offset: Int,
     expanded: UnsafePointer[UInt8, expanded_origin],
 ):
-    var state = InlineArray[UInt8, 16](fill=0)
+    var state = Array[UInt8, 16](fill=0)
     var state_ptr = UnsafePointer(to=state[0])
     for i in range(16):
         state[i] = source[source_offset + i]
@@ -575,7 +576,7 @@ def mpc_aes_ecb(source_address: Int, destination_address: Int, size: Int, key_ad
     var source = bp(source_address)
     var destination = bp(destination_address)
     var key = bp(key_address)
-    var expanded = InlineArray[UInt8, 240](fill=0)
+    var expanded = Array[UInt8, 240](fill=0)
     var expanded_ptr = UnsafePointer(to=expanded[0])
     var rounds = aes_expand_key(key, key_length, expanded_ptr)
     var offset = 0
@@ -604,10 +605,10 @@ def mpc_aes_cbc(source_address: Int, destination_address: Int, size: Int, key_ad
     var destination = bp(destination_address)
     var key = bp(key_address)
     var iv = bp(iv_address)
-    var expanded = InlineArray[UInt8, 240](fill=0)
+    var expanded = Array[UInt8, 240](fill=0)
     var expanded_ptr = UnsafePointer(to=expanded[0])
     var rounds = aes_expand_key(key, key_length, expanded_ptr)
-    var block = InlineArray[UInt8, 16](fill=0)
+    var block = Array[UInt8, 16](fill=0)
     var block_ptr = UnsafePointer(to=block[0])
     var offset = 0
     while offset < size:
@@ -664,12 +665,12 @@ def mpc_aes_ctr(source_address: Int, destination_address: Int, size: Int, key_ad
     var destination = bp(destination_address)
     var key = bp(key_address)
     var initial_counter = bp(counter_address)
-    var expanded = InlineArray[UInt8, 240](fill=0)
+    var expanded = Array[UInt8, 240](fill=0)
     var expanded_ptr = UnsafePointer(to=expanded[0])
     var rounds = aes_expand_key(key, key_length, expanded_ptr)
-    var counter = InlineArray[UInt8, 16](fill=0)
+    var counter = Array[UInt8, 16](fill=0)
     var counter_ptr = UnsafePointer(to=counter[0])
-    var stream = InlineArray[UInt8, 16](fill=0)
+    var stream = Array[UInt8, 16](fill=0)
     var stream_ptr = UnsafePointer(to=stream[0])
     for i in range(16):
         counter[i] = initial_counter[i]
@@ -741,7 +742,7 @@ def hchacha20[
     nonce: UnsafePointer[UInt8, nonce_origin],
     subkey: UnsafePointer[UInt8, subkey_origin],
 ):
-    var state = InlineArray[UInt32, 16](fill=0)
+    var state = Array[UInt32, 16](fill=0)
     state[0] = 0x61707865
     state[1] = 0x3320646e
     state[2] = 0x79622d32
@@ -772,12 +773,12 @@ def chacha_block[
     block_counter: UInt64,
     destination: UnsafePointer[UInt8, destination_origin],
 ):
-    var derived_key = InlineArray[UInt8, 32](fill=0)
+    var derived_key = Array[UInt8, 32](fill=0)
     var derived_ptr = UnsafePointer(to=derived_key[0])
     if nonce_length == 24:
         hchacha20(key, nonce, derived_ptr)
 
-    var initial = InlineArray[UInt32, 16](fill=0)
+    var initial = Array[UInt32, 16](fill=0)
     initial[0] = 0x61707865
     initial[1] = 0x3320646e
     initial[2] = 0x79622d32
@@ -802,7 +803,7 @@ def chacha_block[
         initial[13] = 0
         initial[14] = load32_le(nonce, 16)
         initial[15] = load32_le(nonce, 20)
-    var working = InlineArray[UInt32, 16](fill=0)
+    var working = Array[UInt32, 16](fill=0)
     for i in range(16):
         working[i] = initial[i]
     chacha_rounds(UnsafePointer(to=working[0]).bitcast[UInt8]())
@@ -822,7 +823,7 @@ def mpc_chacha20(source_address: Int, destination_address: Int, size: Int, key_a
     var destination = bp(destination_address)
     var key = bp(key_address)
     var nonce = bp(nonce_address)
-    var stream = InlineArray[UInt8, 64](fill=0)
+    var stream = Array[UInt8, 64](fill=0)
     var stream_ptr = UnsafePointer(to=stream[0])
     var block_counter = byte_position // 64
     var skip = Int(byte_position % 64)
@@ -854,10 +855,10 @@ def sha256_compress[state_origin: MutOrigin, block_origin: MutOrigin](
     block: UnsafePointer[UInt8, block_origin],
 ):
     var words = state.bitcast[UInt32]()
-    var schedule = InlineArray[UInt32, 16](fill=0)
+    var schedule = Array[UInt32, 16](fill=0)
     for i in range(16):
         schedule[i] = load32_be(block, i * 4)
-    comptime constants: InlineArray[UInt32, 64] = [
+    comptime constants: Array[UInt32, 64] = [
         0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
         0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
         0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
@@ -926,7 +927,7 @@ def mpc_sha256(source_address: Int, size: Int, destination_address: Int, sha224:
         return -1
     var source = bp(source_address)
     var destination = bp(destination_address)
-    var state = InlineArray[UInt32, 8](fill=0)
+    var state = Array[UInt32, 8](fill=0)
     if sha224 != 0:
         state[0] = 0xc1059ed8
         state[1] = 0x367cd507
@@ -950,7 +951,7 @@ def mpc_sha256(source_address: Int, size: Int, destination_address: Int, sha224:
     while offset + 64 <= size:
         sha256_compress(state_ptr, source + offset)
         offset += 64
-    var final_blocks = InlineArray[UInt8, 128](fill=0)
+    var final_blocks = Array[UInt8, 128](fill=0)
     var final_ptr = UnsafePointer(to=final_blocks[0])
     var remainder = size - offset
     for i in range(remainder):
@@ -973,10 +974,10 @@ def sha512_compress[state_origin: MutOrigin, block_origin: MutOrigin](
     block: UnsafePointer[UInt8, block_origin],
 ):
     var words = state.bitcast[UInt64]()
-    var schedule = InlineArray[UInt64, 16](fill=0)
+    var schedule = Array[UInt64, 16](fill=0)
     for i in range(16):
         schedule[i] = load64_be(block, i * 8)
-    comptime constants: InlineArray[UInt64, 80] = [
+    comptime constants: Array[UInt64, 80] = [
         0x428a2f98d728ae22, 0x7137449123ef65cd,
         0xb5c0fbcfec4d3b2f, 0xe9b5dba58189dbbc,
         0x3956c25bf348b538, 0x59f111f1b605d019,
@@ -1069,7 +1070,7 @@ def mpc_sha512(source_address: Int, size: Int, destination_address: Int, sha384:
         return -1
     var source = bp(source_address)
     var destination = bp(destination_address)
-    var state = InlineArray[UInt64, 8](fill=0)
+    var state = Array[UInt64, 8](fill=0)
     if sha384 != 0:
         state[0] = 0xcbbb9d5dc1059ed8
         state[1] = 0x629a292a367cd507
@@ -1093,7 +1094,7 @@ def mpc_sha512(source_address: Int, size: Int, destination_address: Int, sha384:
     while offset + 128 <= size:
         sha512_compress(state_ptr, source + offset)
         offset += 128
-    var final_blocks = InlineArray[UInt8, 256](fill=0)
+    var final_blocks = Array[UInt8, 256](fill=0)
     var final_ptr = UnsafePointer(to=final_blocks[0])
     var remainder = size - offset
     for i in range(remainder):
