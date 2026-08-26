@@ -13,9 +13,10 @@ key_size = 32
 class ChaCha20Cipher:
     block_size = 1
 
-    def __init__(self, key: bytes, nonce: bytes):
+    def __init__(self, key: bytes, nonce: bytes, device: str):
         self._key = key
         self.nonce = nonce
+        self._device = device
         self._position = 0
         self._direction = None
 
@@ -31,7 +32,7 @@ class ChaCha20Cipher:
         if len(self.nonce) in (12, 24) and self._position + size > (1 << 32) * 64:
             raise ValueError("ChaCha20 counter would wrap")
         result = _lib.chacha20(
-            data, self._key, self.nonce, self._position, output
+            data, self._key, self.nonce, self._position, output, self._device
         )
         self._direction = direction
         self._position += size
@@ -65,6 +66,9 @@ def new(**kwargs):
     )
     if len(nonce) not in (8, 12, 24):
         raise ValueError("Nonce must be 8, 12 or 24 bytes long")
+    device = kwargs.pop("device", "cpu")
+    if device not in ("cpu", "gpu"):
+        raise ValueError("device must be 'cpu' or 'gpu'")
     if kwargs:
         raise TypeError("Unknown parameters: " + ", ".join(sorted(kwargs)))
-    return ChaCha20Cipher(key, nonce)
+    return ChaCha20Cipher(key, nonce, device)

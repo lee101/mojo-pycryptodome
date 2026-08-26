@@ -77,6 +77,29 @@ def test_generated_nonce_is_exposed():
     assert len(cipher.nonce) == 8
 
 
+def test_explicit_gpu_path_or_silent_cpu_fallback_matches_upstream():
+    key, nonce = bytes(range(32)), bytes(range(12))
+    data = bytes((index * 17 + 3) & 0xFF for index in range(1024 * 1024 + 37))
+    got = ChaCha20.new(key=key, nonce=nonce, device="gpu").encrypt(data)
+    expected = ReferenceChaCha20.new(key=key, nonce=nonce).encrypt(data)
+    assert got == expected
+
+
+def test_gpu_request_with_unaligned_stream_position_falls_back():
+    key, nonce = bytes(range(32)), bytes(range(12))
+    data = bytes(index & 0xFF for index in range(257))
+    cipher = ChaCha20.new(key=key, nonce=nonce, device="gpu")
+    reference = ReferenceChaCha20.new(key=key, nonce=nonce)
+    cipher.seek(5)
+    reference.seek(5)
+    assert cipher.encrypt(data) == reference.encrypt(data)
+
+
+def test_invalid_device_is_rejected():
+    with pytest.raises(ValueError, match="device"):
+        ChaCha20.new(key=bytes(32), nonce=bytes(12), device="tpu")
+
+
 @pytest.mark.parametrize("key_length", [0, 16, 31, 33])
 def test_invalid_key_length(key_length):
     with pytest.raises(ValueError):

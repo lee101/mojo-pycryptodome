@@ -15,6 +15,7 @@ from Crypto.Hash import SHA512 as ReferenceSHA512
 
 from mojopycryptodome.Cipher import AES, ChaCha20
 from mojopycryptodome.Hash import HMAC, SHA256, SHA512
+from mojopycryptodome import _lib
 
 
 def best_time(function, repetitions=3):
@@ -103,6 +104,25 @@ def main():
             ).digest(),
         ),
     ]
+
+    gpu_function = lambda: ChaCha20.new(
+        key=aes256_key, nonce=nonce12, device="gpu"
+    ).encrypt(cipher_data)
+    gpu_function()
+    if _lib._LAST_GPU_USED:
+        cases.append(
+            (
+                "ChaCha20 GPU, 4 MiB",
+                len(cipher_data),
+                gpu_function,
+                lambda: ReferenceChaCha20.new(
+                    key=aes256_key, nonce=nonce12
+                ).encrypt(cipher_data),
+            )
+        )
+    else:
+        print("GPU benchmark skipped: unavailable or under 4000 MiB free.")
+        print()
 
     rows = []
     for name, size, mojo_function, reference_function in cases:

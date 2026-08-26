@@ -15,6 +15,7 @@ LIB_PATH = ROOT / "dist" / "libmojo-pycryptodome.so"
 I64 = ctypes.c_int64
 U64 = ctypes.c_uint64
 _lib: ctypes.CDLL | None = None
+_LAST_GPU_USED = False
 _empty = np.empty(1, dtype=np.uint8)
 
 
@@ -56,6 +57,10 @@ def lib() -> ctypes.CDLL:
             I64, I64, I64, I64, I64, I64, I64, U64
         ]
         loaded.mpc_chacha20.restype = I64
+        loaded.mpc_chacha20_gpu.argtypes = [
+            I64, I64, I64, I64, I64, I64, I64, U64
+        ]
+        loaded.mpc_chacha20_gpu.restype = I64
         loaded.mpc_sha256.argtypes = [I64, I64, I64, I64]
         loaded.mpc_sha256.restype = I64
         loaded.mpc_sha512.argtypes = [I64, I64, I64, I64]
@@ -196,12 +201,14 @@ def chacha20(
     nonce: bytes,
     position: int,
     output: object | None,
+    device: str = "cpu",
 ):
+    global _LAST_GPU_USED
     source, size = _input(data)
     key_array, _ = _input(key)
     nonce_array, _ = _input(nonce)
     destination, owned = _destination(size, output)
-    status = lib().mpc_chacha20(
+    arguments = (
         source.ctypes.data,
         destination.ctypes.data,
         size,
@@ -211,6 +218,11 @@ def chacha20(
         len(nonce),
         position,
     )
+    _LAST_GPU_USED = device == "gpu" and lib().mpc_chacha20_gpu(*arguments) == 1
+    if _LAST_GPU_USED:
+        status = 0
+    else:
+        status = lib().mpc_chacha20(*arguments)
     if status:
         raise ValueError("nonce must be 8, 12, or 24 bytes")
     return _finish(destination, size, owned)

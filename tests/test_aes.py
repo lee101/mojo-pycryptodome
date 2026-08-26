@@ -136,6 +136,27 @@ def test_ctr_little_endian_prefix_suffix_counter_parity():
     assert got == expected
 
 
+@pytest.mark.parametrize("length", [512 * 1024 - 1, 512 * 1024 + 37])
+def test_ctr_parallel_threshold_and_simd_tail(length):
+    key = bytes(range(16))
+    data = bytes((index * 29 + 7) & 0xFF for index in range(length))
+    params = dict(
+        prefix=b"head",
+        suffix=b"tail",
+        initial_value=0x0102030405060708,
+        little_endian=True,
+    )
+    got = AES.new(
+        key, AES.MODE_CTR, counter=Counter.new(64, **params)
+    ).encrypt(data)
+    expected = ReferenceAES.new(
+        key,
+        ReferenceAES.MODE_CTR,
+        counter=Counter.new(64, **params),
+    ).encrypt(data)
+    assert got == expected
+
+
 @pytest.mark.parametrize("mode", [AES.MODE_ECB, AES.MODE_CBC, AES.MODE_CTR])
 def test_output_buffer_semantics(mode):
     key, iv, nonce = os.urandom(16), os.urandom(16), os.urandom(8)

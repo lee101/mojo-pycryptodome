@@ -1,11 +1,16 @@
 """AES, ChaCha20, and SHA-2 kernels exposed through a small C ABI."""
 
 from std.builtin.globals import global_constant
+from max.algorithm import sync_parallelize
+from max.gpu.host import DeviceContext
 from std.collections import Array
+from std.gpu import global_idx
 from std.sys.info import simd_width_of
 from std.sys.intrinsics import llvm_intrinsic
 
 comptime BPtr = UnsafePointer[UInt8, AnyOrigin[mut=True]]
+comptime AES_CTR_PARALLEL_THRESHOLD = 512 * 1024
+comptime AES_CTR_WORKERS = 8
 
 
 @always_inline
@@ -450,6 +455,43 @@ def aes_encrypt_block_aesni[
 
 
 @always_inline
+def aes_encrypt_cbc_block_aesni[
+    source_origin: MutOrigin,
+    destination_origin: MutOrigin,
+    iv_origin: MutOrigin,
+    expanded_origin: MutOrigin,
+    rounds: Int,
+](
+    source: UnsafePointer[UInt8, source_origin],
+    source_offset: Int,
+    destination: UnsafePointer[UInt8, destination_origin],
+    destination_offset: Int,
+    iv: UnsafePointer[UInt8, iv_origin],
+    expanded: UnsafePointer[UInt8, expanded_origin],
+):
+    var state = (
+        (source + source_offset).bitcast[UInt64]().load[width=2](0)
+        ^ iv.bitcast[UInt64]().load[width=2](0)
+        ^ expanded.bitcast[UInt64]().load[width=2](0)
+    )
+    comptime for round_index in range(1, rounds):
+        var round_key = (
+            expanded + round_index * 16
+        ).bitcast[UInt64]().load[width=2](0)
+        state = llvm_intrinsic[
+            "llvm.x86.aesni.aesenc", SIMD[DType.uint64, 2]
+        ](state, round_key)
+    var final_key = (
+        expanded + rounds * 16
+    ).bitcast[UInt64]().load[width=2](0)
+    state = llvm_intrinsic[
+        "llvm.x86.aesni.aesenclast", SIMD[DType.uint64, 2]
+    ](state, final_key)
+    (destination + destination_offset).bitcast[UInt64]().store(0, state)
+    iv.bitcast[UInt64]().store(0, state)
+
+
+@always_inline
 def aes_decrypt_block_aesni[
     source_origin: MutOrigin,
     destination_origin: MutOrigin,
@@ -621,6 +663,19 @@ def mpc_aes_cbc(source_address: Int, destination_address: Int, size: Int, key_ad
             xor_bytes(destination, offset, iv, 0, destination, offset, 16)
             for i in range(16):
                 iv[i] = block[i]
+        elif use_aesni != 0:
+            if rounds == 10:
+                aes_encrypt_cbc_block_aesni[rounds=10](
+                    source, offset, destination, offset, iv, expanded_ptr
+                )
+            elif rounds == 12:
+                aes_encrypt_cbc_block_aesni[rounds=12](
+                    source, offset, destination, offset, iv, expanded_ptr
+                )
+            else:
+                aes_encrypt_cbc_block_aesni[rounds=14](
+                    source, offset, destination, offset, iv, expanded_ptr
+                )
         else:
             xor_bytes(source, offset, iv, 0, block_ptr, 0, 16)
             aes_encrypt_block_dispatch(
@@ -653,6 +708,70 @@ def aes_increment_counter[counter_origin: MutOrigin](
                 break
 
 
+@always_inline
+def aes_advance_counter[counter_origin: MutOrigin](
+    counter: UnsafePointer[UInt8, counter_origin],
+    offset: Int,
+    length: Int,
+    little_endian: Int,
+    blocks: Int,
+):
+    var carry = UInt64(blocks)
+    for i in range(length):
+        var position = offset + i
+        if little_endian == 0:
+            position = offset + length - 1 - i
+        var total = UInt64(counter[position]) + (carry & 0xff)
+        counter[position] = UInt8(total)
+        carry = (carry >> 8) + (total >> 8)
+        if carry == 0:
+            break
+
+
+def aes_ctr_range[
+    source_origin: MutOrigin,
+    destination_origin: MutOrigin,
+    initial_counter_origin: MutOrigin,
+    expanded_origin: MutOrigin,
+](
+    source: UnsafePointer[UInt8, source_origin],
+    destination: UnsafePointer[UInt8, destination_origin],
+    begin: Int,
+    end: Int,
+    initial_counter: UnsafePointer[UInt8, initial_counter_origin],
+    counter_offset: Int,
+    counter_length: Int,
+    little_endian: Int,
+    expanded: UnsafePointer[UInt8, expanded_origin],
+    rounds: Int,
+    use_aesni: Int,
+):
+    var counter = Array[UInt8, 16](fill=0)
+    var counter_ptr = UnsafePointer(to=counter[0])
+    var stream = Array[UInt8, 16](fill=0)
+    var stream_ptr = UnsafePointer(to=stream[0])
+    for i in range(16):
+        counter[i] = initial_counter[i]
+    aes_advance_counter(
+        counter_ptr,
+        counter_offset,
+        counter_length,
+        little_endian,
+        begin // 16,
+    )
+    var position = begin
+    while position < end:
+        aes_encrypt_block_dispatch(
+            counter_ptr, 0, stream_ptr, 0, expanded, rounds, use_aesni
+        )
+        var count = min(16, end - position)
+        xor_bytes(source, position, stream_ptr, 0, destination, position, count)
+        position += count
+        aes_increment_counter(
+            counter_ptr, counter_offset, counter_length, little_endian
+        )
+
+
 @export("mpc_aes_ctr")
 def mpc_aes_ctr(source_address: Int, destination_address: Int, size: Int, key_address: Int, key_length: Int, counter_address: Int, skip: Int, counter_offset: Int, counter_length: Int, little_endian: Int, use_aesni: Int) abi("C") -> Int:
     if size < 0 or source_address == 0 or destination_address == 0 or key_address == 0 or counter_address == 0:
@@ -668,6 +787,44 @@ def mpc_aes_ctr(source_address: Int, destination_address: Int, size: Int, key_ad
     var expanded = Array[UInt8, 240](fill=0)
     var expanded_ptr = UnsafePointer(to=expanded[0])
     var rounds = aes_expand_key(key, key_length, expanded_ptr)
+    if skip == 0 and size >= AES_CTR_PARALLEL_THRESHOLD:
+        var blocks = (size + 15) // 16
+        var workers = min(AES_CTR_WORKERS, blocks)
+
+        @parameter
+        @__copy_capture(
+            source,
+            destination,
+            size,
+            initial_counter,
+            counter_offset,
+            counter_length,
+            little_endian,
+            expanded_ptr,
+            rounds,
+            use_aesni,
+            blocks,
+            workers,
+        )
+        def work(worker: Int):
+            var first_block = worker * blocks // workers
+            var last_block = (worker + 1) * blocks // workers
+            aes_ctr_range(
+                source,
+                destination,
+                first_block * 16,
+                min(last_block * 16, size),
+                initial_counter,
+                counter_offset,
+                counter_length,
+                little_endian,
+                expanded_ptr,
+                rounds,
+                use_aesni,
+            )
+
+        sync_parallelize[work](workers)
+        return 0
     var counter = Array[UInt8, 16](fill=0)
     var counter_ptr = UnsafePointer(to=counter[0])
     var stream = Array[UInt8, 16](fill=0)
@@ -846,6 +1003,79 @@ def mpc_chacha20(source_address: Int, destination_address: Int, size: Int, key_a
         block_counter += 1
         skip = 0
     return 0
+
+
+def chacha20_gpu_kernel(
+    source: BPtr,
+    destination: BPtr,
+    size_value: Int64,
+    key: BPtr,
+    nonce: BPtr,
+    nonce_length_value: Int64,
+    first_counter: UInt64,
+):
+    var size = Int(size_value)
+    var nonce_length = Int(nonce_length_value)
+    var block_index = Int(global_idx.x)
+    var offset = block_index * 64
+    if offset >= size:
+        return
+    var stream = Array[UInt8, 64](fill=0)
+    var stream_ptr = UnsafePointer(to=stream[0])
+    chacha_block(
+        key, nonce, nonce_length, first_counter + UInt64(block_index), stream_ptr
+    )
+    var count = min(64, size - offset)
+    for i in range(count):
+        destination[offset + i] = source[offset + i] ^ stream[i]
+
+
+@export("mpc_chacha20_gpu")
+def mpc_chacha20_gpu(source_address: Int, destination_address: Int, size: Int, key_address: Int, key_length: Int, nonce_address: Int, nonce_length: Int, byte_position: UInt64) abi("C") -> Int:
+    if size <= 0 or source_address == 0 or destination_address == 0:
+        return 0
+    if key_address == 0 or key_length != 32 or nonce_address == 0:
+        return 0
+    if nonce_length != 8 and nonce_length != 12 and nonce_length != 24:
+        return 0
+    if byte_position % 64 != 0:
+        return 0
+    if size > (2 * 1024 * 1024 * 1024 - 56) // 2:
+        return 0
+    try:
+        var source = bp(source_address)
+        var destination = bp(destination_address)
+        var key = bp(key_address)
+        var nonce = bp(nonce_address)
+        with DeviceContext() as ctx:
+            var memory = ctx.get_memory_info()
+            if memory[0] < UInt(4000 * 1024 * 1024):
+                return 0
+            var device_source = ctx.enqueue_create_buffer[DType.uint8](size)
+            var device_destination = ctx.enqueue_create_buffer[DType.uint8](size)
+            var device_key = ctx.enqueue_create_buffer[DType.uint8](32)
+            var device_nonce = ctx.enqueue_create_buffer[DType.uint8](nonce_length)
+            ctx.enqueue_copy(device_source, source)
+            ctx.enqueue_copy(device_key, key)
+            ctx.enqueue_copy(device_nonce, nonce)
+            comptime threads = 128
+            var blocks = (size + 63) // 64
+            ctx.enqueue_function[chacha20_gpu_kernel](
+                device_source,
+                device_destination,
+                Int64(size),
+                device_key,
+                device_nonce,
+                Int64(nonce_length),
+                byte_position // 64,
+                grid_dim=(blocks + threads - 1) // threads,
+                block_dim=threads,
+            )
+            ctx.enqueue_copy(destination, device_destination)
+            ctx.synchronize()
+        return 1
+    except:
+        return 0
 
 
 # SHA-2 -----------------------------------------------------------------------

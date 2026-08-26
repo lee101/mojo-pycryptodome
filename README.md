@@ -79,7 +79,7 @@ The test suite checks published NIST AES and SHA-2 vectors, RFC 8439 ChaCha20,
 RFC 4231 HMAC, padding boundaries, streaming behavior, counter endianness and
 wrap detection, output buffers, validation errors, and randomized parity
 against the real upstream `pycryptodome` package. The current suite contains
-204 passing tests.
+209 passing tests.
 
 Hash and HMAC objects preserve the upstream incremental API, but this first
 release retains update data in Python and performs the hash in Mojo when a
@@ -97,12 +97,13 @@ Linux 6.8.0-136-generic x86_64, glibc 2.39.
 
 | Primitive | Mojo time | Mojo throughput | PyCryptodome time | Speedup |
 |---|---:|---:|---:|---:|
-| AES-128-CTR, 4 MiB | 16.85 ms | 237.43 MiB/s | 8.32 ms | 0.49x |
-| AES-256-CBC, 4 MiB | 16.42 ms | 243.62 MiB/s | 13.43 ms | 0.82x |
-| ChaCha20, 4 MiB | 13.58 ms | 294.48 MiB/s | 16.22 ms | 1.19x |
-| SHA-256, 16 MiB | 117.80 ms | 135.82 MiB/s | 149.65 ms | 1.27x |
-| SHA-512, 16 MiB | 65.83 ms | 243.07 MiB/s | 70.34 ms | 1.07x |
-| HMAC-SHA256, 8 MiB | 44.90 ms | 178.16 MiB/s | 47.06 ms | 1.05x |
+| AES-128-CTR, 4 MiB | 9.50 ms | 421.08 MiB/s | 7.87 ms | 0.83x |
+| AES-256-CBC, 4 MiB | 11.43 ms | 349.93 MiB/s | 12.64 ms | 1.11x |
+| ChaCha20, 4 MiB | 13.10 ms | 305.46 MiB/s | 15.82 ms | 1.21x |
+| SHA-256, 16 MiB | 87.57 ms | 182.72 MiB/s | 94.66 ms | 1.08x |
+| SHA-512, 16 MiB | 56.32 ms | 284.11 MiB/s | 66.55 ms | 1.18x |
+| HMAC-SHA256, 8 MiB | 45.75 ms | 174.87 MiB/s | 47.95 ms | 1.05x |
+| ChaCha20 GPU, 4 MiB | 4.83 ms | 828.59 MiB/s | 15.74 ms | 3.26x |
 
 AES uses guarded AES-NI intrinsics on supported x86-64 hosts and retains a
 tested software fallback, selectable with
@@ -112,7 +113,17 @@ round and substitution tables stay in static read-only storage instead of
 being materialized for each block. Immutable one-shot hash inputs remain
 zero-copy through NumPy and the C ABI.
 
-No threaded, GPU, or GPU-dependent path is shipped.
+Large aligned CTR calls split independent counter ranges across eight CPU
+workers at a 512 KiB threshold; smaller and partial-position calls remain
+serial. CBC encryption keeps its required block dependency but performs the
+XOR, AES-NI rounds, output write, and chaining-state update directly in SIMD
+registers.
+
+ChaCha20 accepts an explicit `device="gpu"` argument. CPU remains the default.
+The GPU path is limited to aligned stream positions, refuses total device
+allocations of 2 GiB or more, and requires at least 4000 MiB of free device
+memory. If any condition, allocation, launch, or device discovery fails, it
+silently runs the CPU implementation. Device buffers are scoped to one call.
 
 ## How it works
 
