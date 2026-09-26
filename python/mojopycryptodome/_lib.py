@@ -5,6 +5,7 @@ from __future__ import annotations
 import ctypes
 import os
 import platform
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -17,6 +18,42 @@ U64 = ctypes.c_uint64
 _lib: ctypes.CDLL | None = None
 _LAST_GPU_USED = False
 _empty = np.empty(1, dtype=np.uint8)
+
+# AES-CTR is compute bound: ten AES rounds of work per 16-byte block, several
+# times the 2 flops/byte above which chunking pays.  Mojo 1.2.0 cannot capture
+# these pointers into a parallel body, so the stream is split here and each
+# chunk is one ctypes call into mpc_aes_ctr_range.  ctypes releases the GIL for
+# the foreign call, so the workers really do run concurrently.
+#
+# Measured on a 36-core Xeon, best of 25, three passes, serial against eight
+# workers: 1 MiB 0.87-1.26x, 2 MiB 0.89-0.91x, 4 MiB 1.08-1.14x,
+# 8 MiB 0.94-1.44x, 16 MiB 0.92-1.34x, 32 MiB 1.44-1.83x, 64 MiB 1.84-2.36x.
+# Below 4 MiB a single call takes under 6 ms and the hand-off costs more than
+# it saves, so the threshold is 4 MiB.  The pool is shared: building a
+# ThreadPoolExecutor per call measured 13.4 ms at 1 MiB against 2.7 ms for the
+# serial kernel.
+AES_CTR_PARALLEL_THRESHOLD = 4 * 1024 * 1024
+AES_CTR_MIN_CHUNK = 512 * 1024
+AES_CTR_MAX_WORKERS = 8
+
+_aes_ctr_pool: ThreadPoolExecutor | None = None
+
+
+def _aes_ctr_executor() -> ThreadPoolExecutor:
+    global _aes_ctr_pool
+    if _aes_ctr_pool is None:
+        _aes_ctr_pool = ThreadPoolExecutor(
+            max_workers=AES_CTR_MAX_WORKERS, thread_name_prefix="mojo-aes-ctr"
+        )
+    return _aes_ctr_pool
+
+
+def _aes_ctr_chunks(size: int) -> list[tuple[int, int]]:
+    """Split [0, size) into whole AES blocks, one range per worker."""
+    parts = min(AES_CTR_MAX_WORKERS, max(1, size // AES_CTR_MIN_CHUNK))
+    step = -(-size // parts)
+    step = -(-step // 16) * 16
+    return [(i * step, min((i + 1) * step, size)) for i in range(-(-size // step))]
 
 
 def _cpu_has_aesni() -> bool:
@@ -53,6 +90,10 @@ def lib() -> ctypes.CDLL:
             I64, I64, I64, I64, I64, I64, I64, I64, I64, I64, I64
         ]
         loaded.mpc_aes_ctr.restype = I64
+        loaded.mpc_aes_ctr_range.argtypes = [
+            I64, I64, I64, I64, I64, I64, I64, I64, I64, I64, I64
+        ]
+        loaded.mpc_aes_ctr_range.restype = I64
         loaded.mpc_chacha20.argtypes = [
             I64, I64, I64, I64, I64, I64, I64, U64
         ]
@@ -177,18 +218,35 @@ def aes_ctr(
     key_array, _ = _input(key)
     counter_array, _ = _input(counter_block)
     destination, owned = _destination(size, output)
-    status = lib().mpc_aes_ctr(
-        source.ctypes.data,
-        destination.ctypes.data,
-        size,
+    shared = (
         key_array.ctypes.data,
         len(key),
         counter_array.ctypes.data,
-        skip,
         counter_offset,
         counter_length,
         int(little_endian),
         int(_USE_AESNI),
+    )
+    if skip == 0 and size >= AES_CTR_PARALLEL_THRESHOLD:
+        ranges = _aes_ctr_chunks(size)
+        if len(ranges) > 1:
+            kernel = lib().mpc_aes_ctr_range
+            src_addr = source.ctypes.data
+            dst_addr = destination.ctypes.data
+
+            def run(bounds: tuple[int, int]) -> None:
+                if kernel(src_addr, dst_addr, bounds[0], bounds[1], *shared):
+                    raise ValueError("invalid AES key")
+
+            list(_aes_ctr_executor().map(run, ranges))
+            return _finish(destination, size, owned)
+    status = lib().mpc_aes_ctr(
+        source.ctypes.data,
+        destination.ctypes.data,
+        size,
+        *shared[:3],
+        skip,
+        *shared[3:],
     )
     if status:
         raise ValueError("invalid AES key")

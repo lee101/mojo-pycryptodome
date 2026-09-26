@@ -114,9 +114,21 @@ being materialized for each block. Immutable one-shot hash inputs remain
 zero-copy through NumPy and the C ABI.
 
 Large aligned CTR calls split independent counter ranges across eight CPU
-workers at a 512 KiB threshold; smaller and partial-position calls remain
-serial. CBC encryption keeps its required block dependency but performs the
-XOR, AES-NI rounds, output write, and chaining-state update directly in SIMD
+workers at a 4 MiB threshold; smaller and partial-position calls remain
+serial. Mojo 1.2.0 cannot capture a buffer into a parallel body, so the split
+is a range-taking `mpc_aes_ctr_range` C entry point called once per chunk from
+a shared `ThreadPoolExecutor` in the Python shim; ctypes releases the GIL for
+each foreign call, so the chunks really do run concurrently. Measured on a
+36-core Xeon, best of 25 over three passes, serial against eight workers:
+1 MiB 0.87x to 1.26x, 2 MiB 0.89x to 0.91x, 4 MiB 1.08x to 1.14x,
+8 MiB 0.94x to 1.44x, 16 MiB 0.92x to 1.34x, 32 MiB 1.44x to 1.83x,
+64 MiB 1.84x to 2.36x. Below 4 MiB a single call takes under 6 ms and thread
+hand-off costs more than it saves. The pool is shared because building a
+`ThreadPoolExecutor` per call measured 13.4 ms at 1 MiB against 2.7 ms for the
+serial kernel.
+
+CBC encryption keeps its required block dependency but performs the XOR,
+AES-NI rounds, output write, and chaining-state update directly in SIMD
 registers.
 
 ChaCha20 accepts an explicit `device="gpu"` argument. CPU remains the default.

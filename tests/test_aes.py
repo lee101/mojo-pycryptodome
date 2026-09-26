@@ -136,8 +136,8 @@ def test_ctr_little_endian_prefix_suffix_counter_parity():
     assert got == expected
 
 
-@pytest.mark.parametrize("length", [512 * 1024 - 1, 512 * 1024 + 37])
-def test_ctr_parallel_threshold_and_simd_tail(length):
+@pytest.mark.parametrize("length", [4 * 1024 * 1024 - 1, 4 * 1024 * 1024 + 37])
+def test_ctr_chunk_boundary_and_simd_tail(length):
     key = bytes(range(16))
     data = bytes((index * 29 + 7) & 0xFF for index in range(length))
     params = dict(

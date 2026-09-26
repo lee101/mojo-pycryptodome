@@ -1,16 +1,13 @@
 """AES, ChaCha20, and SHA-2 kernels exposed through a small C ABI."""
 
 from std.builtin.globals import global_constant
-from max.algorithm import sync_parallelize
 from max.gpu.host import DeviceContext
 from std.collections import Array
-from std.gpu import global_idx
+from max.gpu import global_idx
 from std.sys.info import simd_width_of
 from std.sys.intrinsics import llvm_intrinsic
 
 comptime BPtr = UnsafePointer[UInt8, AnyOrigin[mut=True]]
-comptime AES_CTR_PARALLEL_THRESHOLD = 512 * 1024
-comptime AES_CTR_WORKERS = 8
 
 
 @always_inline
@@ -787,44 +784,6 @@ def mpc_aes_ctr(source_address: Int, destination_address: Int, size: Int, key_ad
     var expanded = Array[UInt8, 240](fill=0)
     var expanded_ptr = UnsafePointer(to=expanded[0])
     var rounds = aes_expand_key(key, key_length, expanded_ptr)
-    if skip == 0 and size >= AES_CTR_PARALLEL_THRESHOLD:
-        var blocks = (size + 15) // 16
-        var workers = min(AES_CTR_WORKERS, blocks)
-
-        @parameter
-        @__copy_capture(
-            source,
-            destination,
-            size,
-            initial_counter,
-            counter_offset,
-            counter_length,
-            little_endian,
-            expanded_ptr,
-            rounds,
-            use_aesni,
-            blocks,
-            workers,
-        )
-        def work(worker: Int):
-            var first_block = worker * blocks // workers
-            var last_block = (worker + 1) * blocks // workers
-            aes_ctr_range(
-                source,
-                destination,
-                first_block * 16,
-                min(last_block * 16, size),
-                initial_counter,
-                counter_offset,
-                counter_length,
-                little_endian,
-                expanded_ptr,
-                rounds,
-                use_aesni,
-            )
-
-        sync_parallelize[work](workers)
-        return 0
     var counter = Array[UInt8, 16](fill=0)
     var counter_ptr = UnsafePointer(to=counter[0])
     var stream = Array[UInt8, 16](fill=0)
@@ -852,6 +811,55 @@ def mpc_aes_ctr(source_address: Int, destination_address: Int, size: Int, key_ad
         position += count
         stream_position = 0
         aes_increment_counter(counter_ptr, counter_offset, counter_length, little_endian)
+    return 0
+
+
+@export("mpc_aes_ctr_range")
+def mpc_aes_ctr_range(
+    source_address: Int,
+    destination_address: Int,
+    begin: Int,
+    end: Int,
+    key_address: Int,
+    key_length: Int,
+    counter_address: Int,
+    counter_offset: Int,
+    counter_length: Int,
+    little_endian: Int,
+    use_aesni: Int,
+) abi("C") -> Int:
+    """Encrypt [begin, end) of an AES-CTR stream from the same initial counter.
+
+    CTR blocks are independent, so a chunked range is the unit of work. Mojo
+    1.2.0 cannot capture these pointers into a parallel body, so the Python
+    shim splits the stream and calls this once per chunk.
+    """
+    if begin < 0 or end < begin or source_address == 0 or destination_address == 0 or key_address == 0 or counter_address == 0:
+        return -3
+    if key_length != 16 and key_length != 24 and key_length != 32:
+        return -1
+    if counter_offset < 0 or counter_length <= 0 or counter_offset + counter_length > 16:
+        return -2
+    var source = bp(source_address)
+    var destination = bp(destination_address)
+    var key = bp(key_address)
+    var initial_counter = bp(counter_address)
+    var expanded = Array[UInt8, 240](fill=0)
+    var expanded_ptr = UnsafePointer(to=expanded[0])
+    var rounds = aes_expand_key(key, key_length, expanded_ptr)
+    aes_ctr_range(
+        source,
+        destination,
+        begin,
+        end,
+        initial_counter,
+        counter_offset,
+        counter_length,
+        little_endian,
+        expanded_ptr,
+        rounds,
+        use_aesni,
+    )
     return 0
 
 
